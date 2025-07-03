@@ -61,6 +61,16 @@ class Backbone(nn.Module):
         self.m2m_a_attn_layers = nn.ModuleList([GraphAttention(hidden_dim=hidden_dim, num_heads=num_heads, dropout=dropout, has_edge_attr=True, if_self_attention=True) for _ in range(num_attn_layers)])
         self.m2m_s_attn_layers = nn.ModuleList([GraphAttention(hidden_dim=hidden_dim, num_heads=num_heads, dropout=dropout, has_edge_attr=False, if_self_attention=True) for _ in range(num_attn_layers)])
 
+        # RealMotion 风格的历史预测轨迹处理组件
+        self.historical_traj_encoder = TwoLayerMLP(input_dim=num_future_steps*2, hidden_dim=hidden_dim, output_dim=hidden_dim)
+        self.historical_feature_fusion = nn.MultiheadAttention(hidden_dim, num_heads, dropout=dropout, batch_first=True)
+        self.historical_gate = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.Sigmoid()
+        )
+
         self.traj_propose = TwoLayerMLP(input_dim=hidden_dim, hidden_dim=hidden_dim, output_dim=self.num_future_steps*2)
 
         self.proposal_to_anchor = TwoLayerMLP(input_dim=self.num_future_steps*2, hidden_dim=hidden_dim, output_dim=hidden_dim)
@@ -79,7 +89,58 @@ class Backbone(nn.Module):
 
         self.apply(init_weights)
 
-    def forward(self, data: Batch, l_embs: torch.Tensor) -> torch.Tensor:
+    def transform_historical_predictions(self, historical_trajs, current_position, current_heading):
+        """
+        将历史预测轨迹变换到当前帧坐标系下
+        historical_trajs: [(N1,...,Nb), H-1, K, F, 2] - 历史帧的预测轨迹
+        current_position: [(N1,...,Nb), 2] - 当前位置
+        current_heading: [(N1,...,Nb)] - 当前朝向
+        """
+        if historical_trajs is None or historical_trajs.size(1) == 0:
+            return None
+            
+        # 变换到当前帧坐标系
+        transformed_trajs = transform_traj_to_local_coordinate(
+            historical_trajs, 
+            current_position.unsqueeze(1).unsqueeze(2).expand(-1, historical_trajs.size(1), historical_trajs.size(2), -1),
+            current_heading.unsqueeze(1).unsqueeze(2).expand(-1, historical_trajs.size(1), historical_trajs.size(2))
+        )
+        
+        # 编码历史轨迹特征
+        batch_size, hist_steps, num_modes, future_steps, _ = transformed_trajs.shape
+        traj_features = transformed_trajs.reshape(-1, future_steps * 2)
+        encoded_features = self.historical_traj_encoder(traj_features)
+        encoded_features = encoded_features.reshape(batch_size, hist_steps, num_modes, self.hidden_dim)
+        
+        return encoded_features
+
+    def fuse_historical_features(self, current_features, historical_features):
+        """
+        融合当前特征和历史特征
+        current_features: [(N1,...,Nb)*H*K, D]
+        historical_features: [(N1,...,Nb), H-1, K, D] 或 None
+        """
+        if historical_features is None:
+            return current_features
+            
+        batch_size, hist_steps, num_modes, hidden_dim = historical_features.shape
+        current_features_reshaped = current_features.reshape(batch_size, self.num_historical_steps, num_modes, hidden_dim)
+        
+        # 使用注意力机制融合历史特征
+        current_seq = current_features_reshaped.reshape(batch_size * num_modes, self.num_historical_steps, hidden_dim)
+        historical_seq = historical_features.reshape(batch_size * num_modes, hist_steps, hidden_dim)
+        
+        # 注意力融合
+        fused_features, _ = self.historical_feature_fusion(current_seq, historical_seq, historical_seq)
+        
+        # 门控机制
+        gate_input = torch.cat([current_seq, fused_features], dim=-1)
+        gate = self.historical_gate(gate_input)
+        enhanced_features = current_seq * gate + fused_features * (1 - gate)
+        
+        return enhanced_features.reshape(batch_size, self.num_historical_steps, num_modes, hidden_dim).reshape(-1, hidden_dim)
+
+    def forward(self, data: Batch, l_embs: torch.Tensor, historical_predictions: torch.Tensor = None) -> torch.Tensor:
         # initialization
         a_length = data['agent']['length']                          #[(N1,...,Nb),H]
         a_embs = self.a_emb_layer(input=a_length.unsqueeze(-1))    #[(N1,...,Nb),H,D]
@@ -87,6 +148,16 @@ class Backbone(nn.Module):
         num_all_agent = a_length.size(0)                # N1+...+Nb
         m_embs = self.mode_tokens.weight.unsqueeze(0).repeat_interleave(self.num_historical_steps,0)            #[H,K,D]
         m_embs = m_embs.unsqueeze(0).repeat_interleave(num_all_agent,0).reshape(-1, self.hidden_dim)            #[(N1,...,Nb)*H*K,D]
+        
+        # RealMotion 风格的历史预测轨迹处理
+        if historical_predictions is not None:
+            current_position = data['agent']['position'][:, -1]  # 当前帧位置
+            current_heading = data['agent']['heading']  # 当前帧朝向
+            historical_features = self.transform_historical_predictions(
+                historical_predictions, current_position, current_heading
+            )
+        else:
+            historical_features = None
 
         m_batch = data['agent']['batch'].unsqueeze(1).repeat_interleave(self.num_modes,1)                       # [(N1,...,Nb),K]
         m_position = data['agent']['position'][:,:self.num_historical_steps].unsqueeze(2).repeat_interleave(self.num_modes,2)  #[(N1,...,Nb),H,K,2]
@@ -179,6 +250,11 @@ class Backbone(nn.Module):
         
         m_embs = m_embs_t + m_embs_l
         m_embs = m_embs.reshape(num_all_agent, self.num_historical_steps, self.num_modes, self.hidden_dim).transpose(0,1).reshape(-1,self.hidden_dim)       #[H*(N1,...,Nb)*K,D]
+        
+        # 融合历史预测轨迹特征 (RealMotion + HPNet 套娃)
+        # 如果历史特征存在，则进行融合
+        if historical_features is not None:
+            m_embs = self.fuse_historical_features(m_embs, historical_features)
         #moda attention  
         for i in range(self.num_attn_layers):
             #m2m_a

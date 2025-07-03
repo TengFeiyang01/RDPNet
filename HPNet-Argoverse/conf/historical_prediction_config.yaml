@@ -1,0 +1,71 @@
+# HPNet with RealMotion-style Historical Prediction Integration
+# 结合 RealMotion 和 HPNet 的套娃配置
+
+model:
+  _target_: model.HPNet
+  hidden_dim: 128
+  num_historical_steps: 20
+  num_future_steps: 30
+  pos_duration: 5
+  pred_duration: 5
+  a2a_radius: 50.0
+  l2a_radius: 50.0
+  num_visible_steps: 20
+  num_modes: 6
+  num_attn_layers: 3
+  num_hops: 3
+  num_heads: 8
+  dropout: 0.1
+  lr: 0.001
+  weight_decay: 0.0001
+  warmup_epochs: 5
+  T_max: 100
+
+datamodule:
+  _target_: datamodules.historical_prediction_datamodule.HistoricalPredictionDataModule
+  historical_window: 3  # 历史预测窗口大小
+  data_dir: "data/argoverse_v1"
+  batch_size: 32
+  num_workers: 8
+  pin_memory: true
+  persistent_workers: true
+
+trainer:
+  max_epochs: 100
+  accelerator: "auto"
+  devices: "auto"
+  strategy: "auto"
+  precision: "16-mixed"
+  gradient_clip_val: 0.5
+  accumulate_grad_batches: 1
+  log_every_n_steps: 50
+  val_check_interval: 1.0
+  num_sanity_val_steps: 2
+  enable_checkpointing: true
+  enable_progress_bar: true
+  enable_model_summary: true
+  deterministic: false
+
+callbacks:
+  - _target_: pytorch_lightning.callbacks.ModelCheckpoint
+    monitor: "val_minFDE"
+    mode: "min"
+    save_top_k: 3
+    save_last: true
+    filename: "hpnet-realmotion-{epoch:02d}-{val_minFDE:.3f}"
+    
+  - _target_: pytorch_lightning.callbacks.EarlyStopping
+    monitor: "val_minFDE"
+    mode: "min"
+    patience: 10
+    min_delta: 0.001
+    
+  - _target_: pytorch_lightning.callbacks.LearningRateMonitor
+    logging_interval: "step"
+
+logger:
+  - _target_: pytorch_lightning.loggers.TensorBoardLogger
+    name: "hpnet-realmotion"
+    save_dir: "logs"
+    version: null
+    log_graph: false 

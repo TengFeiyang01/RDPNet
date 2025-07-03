@@ -18,11 +18,15 @@ Clone the repository and set up the environment:
 ```
 git clone https://github.com/XiaolongTang23/HPNet.git
 cd HPNet
-conda create -n HPNet python=3.8
-conda activate HPNet
-conda install pytorch==2.1.0 torchvision==0.16.0 torchaudio==2.1.0 pytorch-cuda=12.1 -c pytorch -c nvidia
-pip install torch_geometric==2.3.1
-conda install pytorch-lightning==2.0.3
+
+conda create -n traj-fuse python=3.8 -y
+conda activate traj-fuse
+conda install pytorch==2.1.1 torchvision==0.16.1 torchaudio==2.1.1 pytorch-cuda=12.1 -c pytorch -c nvidia -y
+conda install -c pyg -c conda-forge pyg=2.3.1 -y
+conda install pytorch-lightning==2.0.3 -c conda-forge -y
+
+pip install -r requirements.txt
+
 ```
 *Note:* For compatibility, you may experiment with different versions, e.g., PyTorch 1.12.1 has been confirmed to work.
 

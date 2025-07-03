@@ -20,6 +20,14 @@ from visualization import trajectory_visualization
 from utils import generate_target
 from utils import generate_predict_mask
 
+
+from model.model.layers.mamba.vim_mamba      import create_block
+from model.model.layers.time_decoder   import TimeDecoder
+from model.model.layers.transformer_blocks import Block, InteractionBlock
+from model.model.layers.lane_embedding import LaneEmbeddingLayer
+from model.model.model_forecast import StreamModelForecast
+
+
 class HPNet(pl.LightningModule):
 
     def __init__(self,
@@ -92,11 +100,27 @@ class HPNet(pl.LightningModule):
         self.test_traj_output = dict()
         self.test_prob_output = dict()
 
-    def forward(self, 
+        self.demodel = StreamModelForecast(
+            embed_dim=hidden_dim,  # 对应 ModelForecast(embed_dim)
+            num_heads=num_heads,  # 对应 ModelForecast(num_heads)
+            mlp_ratio=4.0,  # 或者你想要的值
+            qkv_bias=False,  # 同上
+            drop_path=dropout,  # ModelForecast(drop_path)
+            future_steps=num_future_steps,  # ModelForecast(future_steps)
+            # —— 再加上 StreamModelForecast 自己的两个开关 ——
+            use_stream_encoder=True,
+            use_stream_decoder=True,
+        )
+        
+
+    def forward(self,
                 data: Batch):
         lane_embs = self.MapEncoder(data=data)
-        pred = self.Backbone(data=data, l_embs=lane_embs)
-        return pred
+        demo_ret = self.demodel(data)
+        historical_predictions = demo_ret['new_y_hat']
+
+        traj_propose, traj_output, prob_output = self.Backbone(data=data, l_embs=lane_embs, historical_predictions=historical_predictions)
+        return traj_propose, traj_output, prob_output
 
     def training_step(self,data,batch_idx):
         traj_propose, traj_output, prob_output = self(data)               #[(N1,...,Nb),H,K,F,2],[(N1,...,Nb),H,K,F,2],[(N1,...,Nb),H,K]
