@@ -21,11 +21,11 @@ from utils import generate_target
 from utils import generate_predict_mask
 
 
-from model.model.layers.mamba.vim_mamba      import create_block
-from model.model.layers.time_decoder   import TimeDecoder
-from model.model.layers.transformer_blocks import Block, InteractionBlock
-from model.model.layers.lane_embedding import LaneEmbeddingLayer
-from model.model.model_forecast import StreamModelForecast
+from model.layers.mamba.vim_mamba      import create_block
+from model.layers.time_decoder   import TimeDecoder
+from model.layers.transformer_blocks import Block, InteractionBlock
+from model.layers.lane_embedding import LaneEmbeddingLayer
+from model.model_forecast import StreamModelForecast
 
 
 class HPNet(pl.LightningModule):
